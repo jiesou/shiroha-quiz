@@ -2571,6 +2571,187 @@ object QuizRepository {
         )
     }
 
+    data class SyncBankImport(val added: Boolean, val bankName: String, val reason: String)
+    data class SyncProgressResult(val wrongCount: Int, val favoriteCount: Int, val recordCount: Int)
+
+    private const val DATA_IMAGE_PREFIX = "data:image/"
+
+    /* 防御性上限：单张图要整个读进内存再 base64，过大容易 OOM。超限时不嵌入、但保留原引用。 */
+    private const val MAX_SYNC_IMAGE_BYTES = 20L * 1024 * 1024
+
+    fun syncBankFingerprint(bank: QuizBank): String = syncQuestionFingerprint(bank.questions)
+
+    fun syncBankFingerprintOfJson(bankJson: JSONObject): String =
+        syncQuestionFingerprint(parseQuestionsArray(bankJson.optJSONArray("questions")))
+
+    private fun syncQuestionFingerprint(questions: List<Question>): String {
+        val builder = StringBuilder()
+        questions.forEach { question ->
+            builder.append(question.type.name).append('\u0001')
+                .append(question.question.trim()).append('\u0001')
+                .append(question.answer.joinToString("/")).append('\u0001')
+                .append(question.options.joinToString("/") { it.text }).append('\u0002')
+        }
+        return builder.toString()
+    }
+
+    fun exportBankForSync(bank: QuizBank): String {
+        return JSONObject()
+            .put("id", bank.id)
+            .put("name", bank.name)
+            .put("groupName", normalizeBankGroupName(bank.groupName))
+            .put("questions", JSONArray(bank.questions.map { syncQuestionJson(it) }))
+            .toString(2)
+    }
+
+    private fun syncQuestionJson(question: Question): JSONObject {
+        val questionJson = questionToJson(question, assetMapping = null)
+        embedImagesAsDataUri(questionJson)
+        return questionJson
+    }
+
+    private fun embedImagesAsDataUri(node: Any?) {
+        when (node) {
+            is JSONObject -> {
+                node.optJSONArray("images")?.let { images ->
+                    for (index in 0 until images.length()) {
+                        val image = images.optJSONObject(index) ?: continue
+                        // 拿不到自包含数据时保持原样
+                        val source = imageDataUriOrNull(image) ?: continue
+                        image.remove("localPath")
+                        image.put("dataUrl", source)
+                    }
+                }
+                node.keys().forEach { key -> embedImagesAsDataUri(node.opt(key)) }
+            }
+            is JSONArray -> for (index in 0 until node.length()) embedImagesAsDataUri(node.opt(index))
+        }
+    }
+
+    /** 同步文件里的图片必须自包含：已有 data URI 直接沿用，本机文件则转为 base64。 */
+    private fun imageDataUriOrNull(image: JSONObject): String? {
+        image.optString("dataUrl").takeIf { it.startsWith(DATA_IMAGE_PREFIX, ignoreCase = true) }
+            ?.let { return it }
+        val current = image.optString("localPath")
+        if (current.startsWith(DATA_IMAGE_PREFIX, ignoreCase = true)) return current
+        if (current.isBlank()) return null
+        val file = File(current)
+        if (!file.isFile || file.length() <= 0L || file.length() > MAX_SYNC_IMAGE_BYTES) return null
+        val extension = file.extension.lowercase(Locale.ROOT)
+        if (!isAllowedDataImageMimeSuffix(extension)) return null
+        val mime = if (extension == "jpg") "image/jpeg" else "image/$extension"
+        return runCatching {
+            "data:$mime;base64," + java.util.Base64.getEncoder().encodeToString(file.readBytes())
+        }.getOrNull()
+    }
+
+    fun importSyncBank(context: Context, rawText: String): SyncBankImport {
+        appContext = context.applicationContext
+        val preview = parseImportJsonPreview(rawText)
+            ?: return SyncBankImport(false, "远程题库", "内容无法识别")
+        val incoming = preview.banks.firstOrNull()
+            ?: return SyncBankImport(false, "远程题库", "内容无法识别")
+        if (banks.any { syncBankFingerprint(it) == syncBankFingerprint(incoming) }) {
+            return SyncBankImport(false, incoming.name, "本地已有相同题库")
+        }
+        val assetDir = File(context.filesDir, "question_assets/sync_${System.currentTimeMillis()}").apply { mkdirs() }
+        val prepared = sanitizeBankWithQuestionIdRepair(
+            normalizeImportedBankAssets(incoming, emptyMap(), assetDir)
+        ).bank
+        val groupName = normalizeBankGroupName(prepared.groupName)
+        val bankId = prepared.id.takeIf { it.isNotBlank() && banks.none { bank -> bank.id == it } }
+            ?: "bank_sync_${System.currentTimeMillis()}"
+        val bank = prepared.copy(
+            id = bankId,
+            name = uniqueImportedBankName(prepared.name, groupName, duplicateSuffix = "（远端副本）"),
+            groupName = groupName
+        )
+        banks.add(bank)
+        if (activeBankId == null) activeBankId = bank.id
+        persist()
+        return SyncBankImport(true, bank.name, "已新增")
+    }
+
+    fun exportProgressForSync(): String {
+        val wrongBookJson = JSONArray(wrongBookToJson(wrongBook))
+        val favoriteJson = JSONArray(favoriteQuestionsToJson(favoriteQuestions))
+        val recordsJson = JSONArray(studyRecordsToJson(studyRecords))
+        // 错题本与记录里内嵌了题目快照，同样不能留本机路径。
+        embedImagesAsDataUri(wrongBookJson)
+        embedImagesAsDataUri(favoriteJson)
+        embedImagesAsDataUri(recordsJson)
+        return JSONObject()
+            .put("wrongBook", wrongBookJson)
+            .put("favoriteQuestions", favoriteJson)
+            .put("studyRecords", recordsJson)
+            .toString()
+    }
+
+    fun mergeSyncProgress(context: Context, root: JSONObject): SyncProgressResult {
+        appContext = context.applicationContext
+        // Web 端写出的图片是内嵌 data URI，必须像题库导入那样落到本地文件，否则渲染端读不到。
+        val assetDir = File(context.filesDir, "question_assets/sync_${System.currentTimeMillis()}").apply { mkdirs() }
+        fun toLocalQuestion(question: Question): Question = normalizeImportedQuestionAssets(question, emptyMap(), assetDir)
+
+        val remoteWrong = parseWrongBookJson(root.optJSONArray("wrongBook")?.toString())
+            .map { it.copy(question = toLocalQuestion(it.question)) }
+        if (remoteWrong.isNotEmpty()) {
+            val merged = LinkedHashMap<Pair<String, String>, WrongQuestionEntry>()
+            wrongBook.forEach { merged[it.bankId to it.question.id] = it }
+            remoteWrong.forEach { entry ->
+                val key = entry.bankId to entry.question.id
+                val existing = merged[key]
+                merged[key] = if (existing == null) entry else mergeSyncWrongEntry(existing, entry)
+            }
+            wrongBook.clear()
+            wrongBook.addAll(merged.values)
+        }
+        val remoteFavorites = parseFavoriteQuestionsJson(root.optJSONArray("favoriteQuestions")?.toString())
+            .map { it.copy(question = toLocalQuestion(it.question)) }
+        if (remoteFavorites.isNotEmpty()) {
+            val known = favoriteQuestions.map { it.bankId to it.question.id }.toMutableSet()
+            remoteFavorites.forEach { entry ->
+                if (known.add(entry.bankId to entry.question.id)) favoriteQuestions.add(entry)
+            }
+        }
+        val remoteRecords = parseStudyRecordsJson(root.optJSONArray("studyRecords")?.toString())
+            .map { record ->
+                record.copy(questionResults = record.questionResults.map { it.copy(question = toLocalQuestion(it.question)) })
+            }
+        if (remoteRecords.isNotEmpty()) {
+            val known = studyRecords.map { it.id }.toMutableSet()
+            remoteRecords.forEach { record -> if (known.add(record.id)) studyRecords.add(record) }
+        }
+        persist()
+        return SyncProgressResult(wrongBook.size, favoriteQuestions.size, studyRecords.size)
+    }
+
+    private fun mergeSyncWrongEntry(local: WrongQuestionEntry, remote: WrongQuestionEntry): WrongQuestionEntry {
+        val newer = if (remote.lastWrongAt > local.lastWrongAt) remote else local
+        val bothMastered = local.status == WrongStatus.MASTERED.label && remote.status == WrongStatus.MASTERED.label
+        return local.copy(
+            bankName = local.bankName.ifBlank { remote.bankName },
+            question = if (local.question.question.isNotBlank()) local.question else remote.question,
+            lastAnswer = if (newer.lastAnswer.isNotEmpty()) newer.lastAnswer else local.lastAnswer,
+            source = local.source.ifBlank { remote.source },
+            timestamp = maxOf(local.timestamp, remote.timestamp),
+            wrongCount = maxOf(local.wrongCount, remote.wrongCount),
+            rightCount = maxOf(local.rightCount, remote.rightCount),
+            reviewRightCount = maxOf(local.reviewRightCount, remote.reviewRightCount),
+            streakCorrectCount = maxOf(local.streakCorrectCount, remote.streakCorrectCount),
+            lastWrongAt = maxOf(local.lastWrongAt, remote.lastWrongAt),
+            lastCorrectAt = laterOf(local.lastCorrectAt, remote.lastCorrectAt),
+            status = if (bothMastered) WrongStatus.MASTERED.label else WrongStatus.NOT_MASTERED.label,
+            lastReviewedAt = laterOf(local.lastReviewedAt, remote.lastReviewedAt),
+            nextReviewAt = earlierOf(local.nextReviewAt, remote.nextReviewAt),
+            reviewLevel = maxOf(local.reviewLevel, remote.reviewLevel)
+        )
+    }
+
+    private fun laterOf(first: Long?, second: Long?): Long? = listOfNotNull(first, second).maxOrNull()
+
+    private fun earlierOf(first: Long?, second: Long?): Long? = listOfNotNull(first, second).minOrNull()
+
     fun importBackupJson(context: Context, rawText: String): String {
         return importBackupBytes(
             context = context,
@@ -4315,7 +4496,8 @@ object QuizRepository {
     private fun uniqueImportedBankName(
         rawName: String,
         groupName: String,
-        reservedNames: Set<String> = emptySet()
+        reservedNames: Set<String> = emptySet(),
+        duplicateSuffix: String = " 导入"
     ): String {
         val cleanGroupName = normalizeBankGroupName(groupName)
         val baseName = rawName.ifBlank { "导入题库" }
@@ -4328,7 +4510,7 @@ object QuizRepository {
         var index = 2
         var candidate: String
         do {
-            candidate = "$baseName 导入$index"
+            candidate = "$baseName$duplicateSuffix$index"
             index += 1
         } while (candidate in existingNames)
         return candidate

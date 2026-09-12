@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoStories
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Article
@@ -210,7 +211,8 @@ fun MeScreen(
 
 @Composable
 fun DataManagementScreen(
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenSync: () -> Unit
 ) {
     val context = LocalContext.current
     var statusText by remember { mutableStateOf<String?>(null) }
@@ -310,6 +312,16 @@ fun DataManagementScreen(
                     modifier = Modifier.weight(1f),
                     warning = true,
                     onClick = { showClearDialog = true }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DataActionTile(
+                    icon = Icons.Rounded.CloudSync,
+                    title = "云端同步",
+                    desc = "WebDAV 上传/下载",
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenSync
                 )
             }
 

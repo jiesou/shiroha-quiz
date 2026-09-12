@@ -5,9 +5,12 @@ const BANK_DEFAULT_GROUP_V58='未分组';
 const CURRENT_SCHEMA_VERSION=1;
 const KEY='shiroha_quiz_state_v28_4_c1';
 const LEGACY_KEYS=[];
-const CLEAR_STORAGE_KEYS=['shiroha_quiz_state','uquiz_state_v8_c1'];
+const WEBDAV_CONFIG_KEY='shiroha_webdav_config';
+const WEBDAV_PASS_SESSION_KEY='shiroha_webdav_pass_session';
 const AI_KEY_SESSION_V99='shiroha_ai_key_session_v99';
 const AI_KEY_LOCAL_V99='shiroha_ai_key_local_v99';
+const CLEAR_STORAGE_KEYS=['shiroha_quiz_state','uquiz_state_v8_c1',WEBDAV_CONFIG_KEY];
+const CLEAR_SESSION_KEYS=[AI_KEY_SESSION_V99,WEBDAV_PASS_SESSION_KEY];
 const AI_IMPORT_MAX_CHARS_V99=50000;
 const AI_PREVIEW_MAX_ITEMS_V991=200;
 const AI_REVIEW_DEFAULT_BATCH_V991=20;
@@ -42,8 +45,10 @@ function migrateState(raw,sourceKey){
   if(sourceKey&&sourceKey!==KEY)migrated.settings={...(migrated.settings||{}),migratedFromStorageKey:sourceKey};
   return migrated;
 }
-function clearStoredState(){[KEY,...LEGACY_KEYS,...CLEAR_STORAGE_KEYS,AI_KEY_LOCAL_V99].forEach(k=>{try{localStorage.removeItem(k)}catch(_){}});try{sessionStorage.removeItem(AI_KEY_SESSION_V99)}catch(_){}}
+function clearStoredState(){[KEY,...LEGACY_KEYS,...CLEAR_STORAGE_KEYS,AI_KEY_LOCAL_V99].forEach(k=>{try{localStorage.removeItem(k)}catch(_){}});CLEAR_SESSION_KEYS.forEach(k=>{try{sessionStorage.removeItem(k)}catch(_){}})}
 function saveState(){localStorage.setItem(KEY,serializeState());toast('已保存到浏览器本地。','ok')}
+function snapshotState(){return JSON.stringify(state)}
+function restoreStateSnapshot(snapshot){try{const previous=JSON.parse(snapshot);Object.keys(state).forEach(k=>delete state[k]);Object.assign(state,previous);upgradeState()}catch(_){}}
 function now(){return new Date().toISOString()}
 function makeId(prefix='id',...parts){
   const base=parts.filter(v=>v!=null&&String(v).trim()).map(v=>String(v).replace(/[^A-Za-z0-9_-]+/g,'_').slice(0,32)).filter(Boolean).join('_');
@@ -7610,7 +7615,7 @@ function syncHomeVersionPromptV586(){
     });
   }catch(e){}
 }
-function init(){upgradeState();ensureAiImportStateV99();ensureDefaultBank();ensureBankGroupUiV58();bindNav();bindEvents();bindMultiBlankEditorV58914();bindV25ToV28Events();ensureV25ToV28Panels();setupSidebarCollapse();renderBankSelect();renderAll();setupEnhancedDataToolsV23();updateShellLayoutByView();syncHomeVersionPromptV586();setTimeout(syncHomeVersionPromptV586,80);setTimeout(syncHomeVersionPromptV586,300);}
+function init(){upgradeState();ensureAiImportStateV99();ensureDefaultBank();ensureBankGroupUiV58();bindNav();bindEvents();bindMultiBlankEditorV58914();bindV25ToV28Events();ensureV25ToV28Panels();setupSidebarCollapse();renderBankSelect();renderAll();setupEnhancedDataToolsV23();setupWebdavSync();updateShellLayoutByView();syncHomeVersionPromptV586();setTimeout(syncHomeVersionPromptV586,80);setTimeout(syncHomeVersionPromptV586,300);}
 function defaultBank(){
   const qb=window.questionBank||{meta:{title:'内置题库（按需加载）'},questions:[]};
   const qs=Array.isArray(qb.questions)?qb.questions:[];
@@ -7929,17 +7934,19 @@ function parseCrossPlatformTimeV24(value,fallback=Date.now()){
   const numeric=Number(value);if(Number.isFinite(numeric)&&numeric>0)return numeric;
   const parsed=Date.parse(String(value));return Number.isFinite(parsed)?parsed:fallback;
 }
-function buildNativeInteropStateV24(exportedBanks){
+function buildNativeInteropStateV24(exportedBanks,keepOrphanProgress){
   const bankMap=new Map((exportedBanks||[]).map(b=>[b.id,b]));
+  const orphan=!!keepOrphanProgress;
   const nativeWrongBook=[];
   Object.entries(state.wrongBook||{}).forEach(([bid,entries])=>{
-    const bank=bankMap.get(bid);if(!bank)return;
-    const questionMap=new Map((bank.questions||[]).map(q=>[q.id,q]));
+    const bank=bankMap.get(bid);
+    if(!bank&&!orphan)return;
+    const questionMap=new Map((bank&&bank.questions||[]).map(q=>[q.id,q]));
     (entries||[]).forEach(e=>{
       const q=questionMap.get(e.id)||(e.nativeQuestion&&typeof e.nativeQuestion==='object'?e.nativeQuestion:null);if(!q)return;
       const lastWrongAt=parseCrossPlatformTimeV24(e.lastWrongAt,Date.now());
       nativeWrongBook.push({
-        bankId:bid,bankName:bank.name||bank.title||'',question:q,lastAnswer:Array.isArray(e.lastAnswer)?e.lastAnswer:[],source:e.source||'web-export',timestamp:Number(e.timestamp||lastWrongAt),
+        bankId:bid,bankName:bank?(bank.name||bank.title||''):(e.bankName||''),question:q,lastAnswer:Array.isArray(e.lastAnswer)?e.lastAnswer:[],source:e.source||'web-export',timestamp:Number(e.timestamp||lastWrongAt),
         wrongCount:Number(e.wrongCount||1),rightCount:Number(e.rightCount||0),reviewRightCount:Number(e.reviewRightCount||0),streakCorrectCount:Number(e.streakCorrectCount||0),
         lastWrongAt,lastCorrectAt:e.lastCorrectAt?parseCrossPlatformTimeV24(e.lastCorrectAt,null):null,status:e.status||'未掌握',
         lastReviewedAt:e.lastReviewedAt?parseCrossPlatformTimeV24(e.lastReviewedAt,null):null,nextReviewAt:e.nextReviewAt?parseCrossPlatformTimeV24(e.nextReviewAt,null):null,reviewLevel:Number(e.reviewLevel||0)
@@ -7948,9 +7955,10 @@ function buildNativeInteropStateV24(exportedBanks){
   });
   const nativeFavorites=[];
   Object.entries(state.favorites||{}).forEach(([bid,ids])=>{
-    const bank=bankMap.get(bid);if(!bank)return;
-    const questionMap=new Map((bank.questions||[]).map(q=>[q.id,q]));
-    const favoriteMeta=state.crossPlatformMeta&&state.crossPlatformMeta.favoriteQuestions&&state.crossPlatformMeta.favoriteQuestions[bid]||{};(ids||[]).forEach(qid=>{const q=questionMap.get(qid)||(favoriteMeta[qid]&&favoriteMeta[qid].question);if(q)nativeFavorites.push({question:q,bankId:bid,bankName:bank.name||bank.title||'',favoritedAt:Number(favoriteMeta[qid]&&favoriteMeta[qid].favoritedAt||Date.now())})});
+    const bank=bankMap.get(bid);
+    if(!bank&&!orphan)return;
+    const questionMap=new Map((bank&&bank.questions||[]).map(q=>[q.id,q]));
+    const favoriteMeta=state.crossPlatformMeta&&state.crossPlatformMeta.favoriteQuestions&&state.crossPlatformMeta.favoriteQuestions[bid]||{};(ids||[]).forEach(qid=>{const q=questionMap.get(qid)||(favoriteMeta[qid]&&favoriteMeta[qid].question);if(q)nativeFavorites.push({question:q,bankId:bid,bankName:bank?(bank.name||bank.title||''):'',favoritedAt:Number(favoriteMeta[qid]&&favoriteMeta[qid].favoritedAt||Date.now())})});
   });
   const nativeRecords=(state.records||[]).map(r=>{
     const bid=r.bankId||'';const bank=bid?bankMap.get(bid):null;
@@ -8237,7 +8245,7 @@ function importBackupJsonFileV23(e){
       const data=JSON.parse(text);applyBackupAssetsV24(data,loaded.assets||{});const unresolvedImageCount=countUnresolvedBackupImagesV24(data);const normalized=normalizeBackupPayloadV23(data,file.name);
       if(!normalized.banks.length){toast('没有在 JSON 中找到可导入的题库。','warn');return}
       const mode=backupImportModeV23||'merge';
-      const previousStateJson=JSON.stringify(state);
+      const previousStateJson=snapshotState();
       if(mode==='overwrite'){
         if(!confirm(`覆盖恢复会清空当前本地数据，并导入 ${normalized.banks.length} 个题库。确定继续？`))return;
         const previousWebSettings=state.settings&&typeof state.settings==='object'?state.settings:{};state.schemaVersion=CURRENT_SCHEMA_VERSION;state.banks=normalized.banks.map(b=>({...b,groupName:normalizeBankGroupNameV58(b.groupName)}));state.activeBankId=normalized.activeBankId||state.banks[0]?.id||'';state.wrongBook=normalized.wrongBook||{};state.favorites=normalized.favorites||{};state.records=Array.isArray(normalized.records)?normalized.records:[];state.settings=normalized.hasWebSettings&&normalized.settings&&typeof normalized.settings==='object'?normalized.settings:previousWebSettings;state.crossPlatformMeta=normalized.crossPlatformMeta&&typeof normalized.crossPlatformMeta==='object'?normalized.crossPlatformMeta:{favoriteQuestions:{}};
@@ -8245,7 +8253,7 @@ function importBackupJsonFileV23(e){
         mergeBackupBanksV23(normalized);
       }
       upgradeState();ensureDefaultBank();
-      try{saveSilent()}catch(storageError){const previous=JSON.parse(previousStateJson);Object.keys(state).forEach(k=>delete state[k]);Object.assign(state,previous);upgradeState();throw new Error('导入内容超过浏览器本地存储容量，已恢复导入前数据。可减少图片后重试，或只导入部分题库。')}
+      try{saveSilent()}catch(storageError){restoreStateSnapshot(previousStateJson);throw new Error('导入内容超过浏览器本地存储容量，已恢复导入前数据。可减少图片后重试，或只导入部分题库。')}
       renderAll();setupEnhancedDataToolsV23();
       const total=normalized.banks.reduce((n,b)=>n+(b.questions||[]).length,0);
       toast(`导入完成：${normalized.banks.length} 个题库，${total} 道题。${unresolvedImageCount?` 另有 ${unresolvedImageCount} 张图片未包含在备份文件中，Web 端无法显示。`:''}`,unresolvedImageCount?'warn':'ok');
@@ -8527,6 +8535,483 @@ function cancelBankEditSessionV45(){
   switchViewV45('banks');
 }
 /* SHIROHA_WEB_V45_BANK_EDITOR_AND_FOCUS_NAV_END */
+
+/* SHIROHA_WEB_WEBDAV_SYNC_START
+   WebDAV 手动云同步。上传与下载完全分离；下载只做新增，永不覆盖本地已有题库。
+*/
+const WEBDAV_DEFAULT_DIR_='shiroha-quiz';
+const WEBDAV_META_FILE_='index.json';
+const WEBDAV_PROGRESS_FILE_='progress.json';
+const WEBDAV_BANKS_DIR_='banks';
+const WEBDAV_TRASH_DIR_='trash';
+let webdavUploadSel=new Set();
+let webdavDownloadSel=new Set();
+let webdavRemote=[];
+let webdavBusy=false;
+
+function webdavConfig(){
+  let raw={};
+  try{raw=JSON.parse(localStorage.getItem(WEBDAV_CONFIG_KEY)||'{}')||{}}catch(_){raw={}}
+  const cfg={server:String(raw.server||''),user:String(raw.user||''),dir:String(raw.dir||'').trim()||WEBDAV_DEFAULT_DIR_,remember:raw.remember!==false};
+  cfg.pass=cfg.remember?String(raw.pass||''):safeStorageGetV99(sessionStorage,WEBDAV_PASS_SESSION_KEY);
+  return cfg;
+}
+function saveWebdavConfig(){
+  const cfg={server:String($('#webdav-server')?.value||'').trim(),user:String($('#webdav-user')?.value||'').trim(),dir:String($('#webdav-dir')?.value||'').trim()||WEBDAV_DEFAULT_DIR_,remember:!!$('#webdav-remember')?.checked};
+  const pass=String($('#webdav-pass')?.value||'');
+  const stored={...cfg};if(cfg.remember)stored.pass=pass;
+  try{localStorage.setItem(WEBDAV_CONFIG_KEY,JSON.stringify(stored))}catch(_){}
+  safeStorageSetV99(sessionStorage,WEBDAV_PASS_SESSION_KEY,cfg.remember?'':pass);
+  return {...cfg,pass};
+}
+function encodeWebdavPath(path){
+  return String(path||'').split('/').map(segment=>{
+    if(!segment)return '';
+    let decoded=segment;try{decoded=decodeURIComponent(segment)}catch(_){}
+    return encodeURIComponent(decoded);
+  }).join('/');
+}
+function normalizeWebdavServer(input){
+  let raw=String(input||'').trim();
+  if(!raw)return '';
+  raw=raw.replace(/^davs:\/\//i,'https://').replace(/^dav:\/\//i,'http://');
+  if(!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw))raw='http://'+raw;
+  let parsed=null;try{parsed=new URL(raw)}catch(_){return ''}
+  if(parsed.protocol!=='http:'&&parsed.protocol!=='https:')return '';
+  const path=parsed.pathname.replace(/\/+$/,'');
+  return parsed.origin+(path?encodeWebdavPath(path):'');
+}
+function webdavRootUrl(cfg){
+  const base=normalizeWebdavServer(cfg&&cfg.server);
+  if(!base)return '';
+  const dir=String(cfg.dir||'').replace(/^\/+|\/+$/g,'');
+  return dir?base+'/'+encodeWebdavPath(dir):base;
+}
+function webdavRelUrl(relative){
+  const root=webdavRootUrl(webdavConfig());
+  if(!root)return '';
+  const rel=String(relative||'').replace(/^\/+|\/+$/g,'');
+  return rel?root+'/'+encodeWebdavPath(rel):root;
+}
+function webdavFileKey(id){
+  const raw=String(id||'');
+  const safe=raw.replace(/[^A-Za-z0-9_-]/g,'_').slice(0,80);
+  if(safe&&safe===raw)return safe;
+  let hash=0;for(let i=0;i<raw.length;i++)hash=(hash*31+raw.charCodeAt(i))>>>0;
+  return `${safe||'bank'}_${hash.toString(36)}`;
+}
+function webdavAuthHeader(cfg){
+  if(!cfg||(!cfg.user&&!cfg.pass))return '';
+  return 'Basic '+bytesToBase64(new TextEncoder().encode(`${cfg.user}:${cfg.pass}`));
+}
+function webdavHttpError(res,action){
+  const known={401:'认证失败：请检查用户名和密码。',403:'服务器拒绝访问：该账号没有读写权限。',404:'路径不存在：请检查服务器地址和远程目录。',409:'上级目录不存在：请先在服务器上创建该路径。',423:'远程文件被锁定，请稍后重试。',507:'服务器存储空间不足。'};
+  return new Error(known[res.status]||`${action}失败（HTTP ${res.status}）`);
+}
+async function webdavRequest(method,url,options){
+  const opts=options||{};
+  if(!url)throw new Error('服务器地址或远程目录无效，请先保存配置。');
+  const headers={...(opts.headers||{})};
+  const auth=webdavAuthHeader(webdavConfig());
+  if(auth)headers.Authorization=auth;
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),Number(opts.timeoutMs||60000));
+  let res;
+  try{
+    res=await fetch(url,{method,headers,body:opts.body,signal:controller.signal,cache:'no-store'});
+  }catch(error){
+    if(error&&error.name==='AbortError')throw new Error('连接超时：请确认服务器地址可访问。https 页面无法访问 http 服务器。');
+    throw new Error('无法连接服务器：'+((error&&error.message)||error)+'。请检查地址、网络和服务器跨域设置。');
+  }finally{clearTimeout(timer)}
+  const action=opts.action||'请求';
+  if(!(res.ok||(opts.tolerate||[]).includes(res.status)))throw webdavHttpError(res,action);
+  return res;
+}
+async function webdavEnsureDir(url){
+  await webdavRequest('MKCOL',url,{timeoutMs:20000,action:'创建远程目录',tolerate:[405,301]});
+}
+async function webdavReadJson(url,action){
+  const res=await webdavRequest('GET',url,{timeoutMs:120000,action,tolerate:[404]});
+  if(res.status===404)return {missing:true,data:null};
+  const text=await res.text();
+  try{return {missing:false,data:JSON.parse(text)}}
+  catch(_){throw new Error(`${action}：远程文件不是合法 JSON，已中止以免覆盖它。`)}
+}
+async function webdavEnsureDirs(){
+  if(!webdavRelUrl(''))throw new Error('请先填写并保存服务器地址。');
+  for(const target of [webdavRelUrl(''),webdavRelUrl(WEBDAV_BANKS_DIR_),webdavRelUrl(WEBDAV_TRASH_DIR_)]){
+    await webdavEnsureDir(target);
+  }
+}
+async function webdavTest(){
+  const root=webdavRootUrl(webdavConfig());
+  if(!root)throw new Error('请先填写服务器地址。');
+  const res=await webdavRequest('PROPFIND',root,{headers:{Depth:'0'},timeoutMs:20000,action:'测试连接',tolerate:[404]});
+  if(res.status===404)return '连接成功。远程目录还不存在，第一次上传时会自动创建。';
+  return '连接成功，远程目录可访问。';
+}
+function setWebdavStatus(text,level){
+  const el=$('#webdav-status');if(!el)return;
+  el.className='notice'+(level?' '+level:'');
+  el.textContent=text;
+}
+function reportWebdav(message,ok){setWebdavStatus(message,ok?'ok':'warn');toast(message,ok?'ok':'danger')}
+function setWebdavBusy(busy){
+  webdavBusy=!!busy;
+  ['#webdav-save','#webdav-test','#webdav-upload','#webdav-load-remote','#webdav-download'].forEach(selector=>{const el=$(selector);if(el)el.disabled=!!busy});
+}
+/* 本地题库和远端文件要经过同一条导入管线再比较：图片题的题干 markdown 与 images[] 会在
+   导出时改写（![图](data:) <-> 【图】），直接比较两侧的原始形态永远不相等。 */
+function webdavNormalizedPrint(rawBank){
+  const print=bank=>((bank&&bank.questions)||[]).map(q=>{
+    let item=q;try{item=normalizeQuestion(q,0)}catch(_){item=q||{}}
+    return [item.type||'',String(item.question||'').trim(),JSON.stringify(item.answer||[]),JSON.stringify((item.options||[]).map(o=>o&&o.text||''))].join('\u0001');
+  }).join('\u0002');
+  try{
+    const copy=JSON.parse(JSON.stringify(rawBank||{}));
+    const payload=normalizeBackupPayloadV23({questions:copy.questions||[]},(copy.name||'bank')+'.json');
+    return print(payload.banks[0]||{});
+  }catch(_){return print(rawBank)}
+}
+function mergeWrongEntry(left,right){
+  const a=left||{},b=right||{};
+  const newer=String(a.lastWrongAt||'')>=String(b.lastWrongAt||'')?a:b;
+  const pick=(x,y,wantMax)=>{const xs=String(x||''),ys=String(y||'');if(!xs)return ys;if(!ys)return xs;return (wantMax?xs>=ys:xs<=ys)?xs:ys};
+  return {
+    id:a.id||b.id,
+    wrongCount:Math.max(Number(a.wrongCount||0),Number(b.wrongCount||0)),
+    rightCount:Math.max(Number(a.rightCount||0),Number(b.rightCount||0)),
+    reviewRightCount:Math.max(Number(a.reviewRightCount||0),Number(b.reviewRightCount||0)),
+    streakCorrectCount:Math.max(Number(a.streakCorrectCount||0),Number(b.streakCorrectCount||0)),
+    lastWrongAt:pick(a.lastWrongAt,b.lastWrongAt,true),
+    lastCorrectAt:pick(a.lastCorrectAt,b.lastCorrectAt,true),
+    lastReviewedAt:pick(a.lastReviewedAt,b.lastReviewedAt,true),
+    nextReviewAt:pick(a.nextReviewAt,b.nextReviewAt,false),
+    reviewLevel:Math.max(Number(a.reviewLevel||0),Number(b.reviewLevel||0)),
+    lastAnswer:(Array.isArray(newer.lastAnswer)&&newer.lastAnswer.length)?newer.lastAnswer:(Array.isArray(a.lastAnswer)?a.lastAnswer:[]),
+    source:a.source||b.source||'web',
+    timestamp:Math.max(Number(a.timestamp||0),Number(b.timestamp||0)),
+    status:(a.status==='已掌握'&&b.status==='已掌握')?'已掌握':'未掌握',
+    nativeQuestion:a.nativeQuestion||b.nativeQuestion
+  };
+}
+function mergeWrongBook(local,remote){
+  const out={};
+  const ids=new Set([...Object.keys(local||{}),...Object.keys(remote||{})]);
+  ids.forEach(bankId=>{
+    const byQuestion=new Map();
+    ((local&&local[bankId])||[]).forEach(entry=>{const id=String(entry&&entry.id||'');if(id)byQuestion.set(id,entry)});
+    ((remote&&remote[bankId])||[]).forEach(entry=>{
+      const id=String(entry&&entry.id||'');if(!id)return;
+      byQuestion.set(id,byQuestion.has(id)?mergeWrongEntry(byQuestion.get(id),entry):entry);
+    });
+    out[bankId]=[...byQuestion.values()];
+  });
+  return out;
+}
+function mergeFavorites(local,remote){
+  const out={};
+  const ids=new Set([...Object.keys(local||{}),...Object.keys(remote||{})]);
+  ids.forEach(bankId=>{
+    const merged=[...((local&&local[bankId])||[]),...((remote&&remote[bankId])||[])];
+    out[bankId]=[...new Set(merged.filter(Boolean).map(String))];
+  });
+  return out;
+}
+function mergeRecords(local,remote){
+  const byId=new Map();
+  (Array.isArray(local)?local:[]).forEach(record=>{const id=String(record&&record.id||'');if(id)byId.set(id,record)});
+  (Array.isArray(remote)?remote:[]).forEach(record=>{
+    const id=String(record&&record.id||'');if(!id)return;
+    const existing=byId.get(id);
+    if(!existing||String(record.date||'')>String(existing.date||''))byId.set(id,record);
+  });
+  return [...byId.values()];
+}
+/* 云端 progress.json 使用跨端格式（与 Android 原生一致），两端都能直接读写。 */
+function applyRemoteProgress(source){
+  const data=source&&typeof source==='object'?source:{};
+  const favoriteMeta=extractNativeFavoriteMetaV24(data.favoriteQuestions||[]);
+  state.wrongBook=mergeWrongBook(state.wrongBook||{},convertNativeWrongBookToWebV24(data.wrongBook||[]));
+  state.favorites=mergeFavorites(state.favorites||{},convertNativeFavoritesToWebV24(data.favoriteQuestions||[]));
+  state.records=mergeRecords(state.records||[],convertNativeRecordsToWebV24(data.studyRecords||[]));
+  state.crossPlatformMeta=state.crossPlatformMeta&&typeof state.crossPlatformMeta==='object'?state.crossPlatformMeta:{favoriteQuestions:{}};
+  const target=state.crossPlatformMeta.favoriteQuestions=state.crossPlatformMeta.favoriteQuestions&&typeof state.crossPlatformMeta.favoriteQuestions==='object'?state.crossPlatformMeta.favoriteQuestions:{};
+  Object.keys(favoriteMeta).forEach(bankId=>{target[bankId]={...favoriteMeta[bankId],...(target[bankId]||{})}});
+  return {wrong:Object.values(state.wrongBook).reduce((total,list)=>total+(Array.isArray(list)?list.length:0),0),records:state.records.length};
+}
+async function webdavWriteMeta(uploadedBanks){
+  const url=webdavRelUrl(WEBDAV_META_FILE_);
+  const loaded=await webdavReadJson(url,'读取远程清单');
+  const remoteIndex=loaded.data||{};
+  const byId=new Map();
+  (Array.isArray(remoteIndex.banks)?remoteIndex.banks:[]).forEach(item=>{const id=String(item&&item.id||'');if(id)byId.set(id,item)});
+  (uploadedBanks||[]).forEach(bank=>{
+    byId.set(String(bank.id),{
+      id:String(bank.id),
+      name:String(bank.name||''),
+      groupName:String(bank.groupName||''),
+      questionCount:((bank.questions)||[]).length,
+      updatedAt:bank.updatedAt||now(),
+      file:`${WEBDAV_BANKS_DIR_}/${webdavFileKey(bank.id)}.json`
+    });
+  });
+  const payload={
+    app:'Shiroha Quiz',
+    kind:'shiroha_quiz_webdav_index',
+    schemaVersion:CURRENT_SCHEMA_VERSION,
+    updatedAt:now(),
+    banks:[...byId.values()]
+  };
+  await webdavRequest('PUT',url,{body:JSON.stringify(payload,null,2),headers:{'Content-Type':'application/json; charset=utf-8'},timeoutMs:60000,action:'写入远程清单'});
+}
+async function webdavUploadProgress(){
+  const url=webdavRelUrl(WEBDAV_PROGRESS_FILE_);
+  const remote=await webdavReadJson(url,'读取远端学习进度');
+  if(!remote.missing&&remote.data)applyRemoteProgress(remote.data);
+  const native=buildNativeInteropStateV24(state.banks||[],true);
+  const payload={app:'Shiroha Quiz',kind:'shiroha_quiz_webdav_progress',schemaVersion:CURRENT_SCHEMA_VERSION,updatedAt:now(),wrongBook:native.wrongBook,favoriteQuestions:native.favoriteQuestions,studyRecords:native.studyRecords};
+  await webdavRequest('PUT',url,{body:JSON.stringify(payload),headers:{'Content-Type':'application/json; charset=utf-8'},timeoutMs:120000,action:'上传学习进度'});
+}
+async function webdavUpload(){
+  if(webdavBusy)return;
+  saveWebdavConfig();
+  const picked=(state.banks||[]).filter(bank=>webdavUploadSel.has(bank.id));
+  const includeProgress=!!$('#webdav-progress-upload')?.checked;
+  if(!picked.length&&!includeProgress){toast('请至少勾选一个题库，或勾选“同时上传学习进度”。','warn');return}
+  setWebdavBusy(true);
+  try{
+    setWebdavStatus('正在准备远程目录…');
+    await webdavEnsureDirs();
+    let trashed=0;
+    for(let index=0;index<picked.length;index++){
+      const bank=picked[index];
+      setWebdavStatus(`正在上传题库：${bank.name}（${index+1}/${picked.length}）…`);
+      const payload=JSON.stringify(serializeBankForCrossExportV53(bank),null,2);
+      const url=webdavRelUrl(`${WEBDAV_BANKS_DIR_}/${webdavFileKey(bank.id)}.json`);
+      const existing=await webdavRequest('GET',url,{timeoutMs:120000,action:'读取远端题库「'+bank.name+'」',tolerate:[404]});
+      if(existing.ok){
+        const previous=await existing.text();
+        const changed=previous!==payload;
+        if(changed){
+          const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+          const trashUrl=webdavRelUrl(`${WEBDAV_TRASH_DIR_}/${webdavFileKey(bank.id)}-${stamp}.json`);
+          await webdavRequest('PUT',trashUrl,{body:previous,headers:{'Content-Type':'application/json; charset=utf-8'},timeoutMs:120000,action:'备份远端旧版本'});
+          trashed++;
+        }
+      }
+      await webdavRequest('PUT',url,{body:payload,headers:{'Content-Type':'application/json; charset=utf-8'},timeoutMs:120000,action:'上传题库「'+bank.name+'」'});
+    }
+    if(includeProgress){
+      setWebdavStatus('正在合并并上传学习进度…');
+      await webdavUploadProgress();
+    }
+    setWebdavStatus('正在更新远程清单…');
+    await webdavWriteMeta(picked);
+    saveSilent();renderAll();renderWebdavUploadList();
+    const parts=[`已上传 ${picked.length} 个题库`];
+    if(includeProgress)parts.push('已合并学习进度');
+    if(trashed)parts.push(`已备份 ${trashed} 份远端旧版本`);
+    reportWebdav(parts.join('；')+'。',true);
+  }catch(error){
+    reportWebdav('上传失败：'+error.message,false);
+  }finally{setWebdavBusy(false)}
+}
+async function webdavLoadRemoteList(){
+  if(webdavBusy)return;
+  saveWebdavConfig();
+  setWebdavBusy(true);
+  try{
+    setWebdavStatus('正在读取远程清单…');
+    const loaded=await webdavReadJson(webdavRelUrl(WEBDAV_META_FILE_),'读取远程清单');
+    if(loaded.missing){
+      webdavRemote=[];webdavDownloadSel=new Set();renderWebdavRemoteList();
+      setWebdavStatus('远程还没有清单，请先执行一次上传。','warn');
+      return;
+    }
+    const meta=loaded.data||{};
+    webdavRemote=(Array.isArray(meta.banks)?meta.banks:[]).map(item=>({
+      id:String(item&&item.id||''),
+      name:String(item&&item.name||'未命名题库'),
+      questionCount:Number(item&&item.questionCount||0),
+      updatedAt:String(item&&item.updatedAt||''),
+      file:String(item&&item.file||'')
+    })).filter(item=>item.id);
+    webdavDownloadSel=new Set(webdavRemote.filter(item=>!state.banks.some(bank=>bank.id===item.id)).map(item=>item.id));
+    renderWebdavRemoteList();
+    setWebdavStatus(`远程 ${webdavRemote.length} 个题库，已勾选 ${webdavDownloadSel.size} 个本地没有的。`,'ok');
+  }catch(error){
+    reportWebdav('读取远程清单失败：'+error.message,false);
+  }finally{setWebdavBusy(false)}
+}
+function uniqueWebdavBankName(base){
+  const taken=new Set((state.banks||[]).map(bank=>String(bank.name||'')));
+  if(!taken.has(base))return base;
+  let index=2;while(taken.has(`${base} ${index}`))index++;
+  return `${base} ${index}`;
+}
+async function webdavDownload(){
+  if(webdavBusy)return;
+  saveWebdavConfig();
+  const picked=webdavRemote.filter(item=>webdavDownloadSel.has(item.id));
+  const includeProgress=!!$('#webdav-progress-download')?.checked;
+  if(!picked.length&&!includeProgress){toast('请至少勾选一个题库，或勾选“同时合并远端学习进度”。','warn');return}
+  if(picked.length&&!confirm(`下载 ${picked.length} 个远程题库？\n\n不会覆盖本地题库，内容不同的会另存为「远端副本」。`))return;
+  setWebdavBusy(true);
+  const snapshot=snapshotState();
+  try{
+    const added=[];const copies=[];const skipped=[];
+    for(let index=0;index<picked.length;index++){
+      const item=picked[index];
+      setWebdavStatus(`正在下载题库：${item.name}（${index+1}/${picked.length}）…`);
+      const loaded=await webdavReadJson(webdavRelUrl(item.file||`${WEBDAV_BANKS_DIR_}/${webdavFileKey(item.id)}.json`),'下载题库「'+item.name+'」');
+      if(loaded.missing){skipped.push(`${item.name}（远程文件缺失）`);continue}
+      const normalized=normalizeBackupPayloadV23(loaded.data,`${item.name}.json`);
+      const incoming=normalized.banks[0];
+      if(!incoming){skipped.push(`${item.name}（内容无法识别）`);continue}
+      const incomingPrint=webdavNormalizedPrint(incoming);
+      const duplicate=state.banks.find(bank=>webdavNormalizedPrint(bank)===incomingPrint);
+      if(duplicate){skipped.push(`${duplicate.name}（本地已有相同题库）`);continue}
+      const local=state.banks.find(bank=>bank.id===incoming.id);
+      if(!local){state.banks.push(incoming);added.push(incoming.name);continue}
+      const copy={...incoming,id:makeId('bank_remote',incoming.id),name:uniqueWebdavBankName(`${incoming.name}（远端副本）`),createdAt:now(),updatedAt:now()};
+      state.banks.push(copy);copies.push(copy.name);
+    }
+    let progressText='';
+    if(includeProgress){
+      setWebdavStatus('正在合并远端学习进度…');
+      const loaded=await webdavReadJson(webdavRelUrl(WEBDAV_PROGRESS_FILE_),'下载远端学习进度');
+      if(loaded.missing)progressText='远端没有学习进度';
+      else{
+        const merged=applyRemoteProgress(loaded.data);
+        progressText=`已合并学习进度（错题 ${merged.wrong}、记录 ${merged.records}）`;
+      }
+    }
+    try{saveSilent()}
+    catch(storageError){throw new Error('超出本地存储容量，可减少题库或图片后重试。')}
+    renderAll();setupEnhancedDataToolsV23();renderWebdavRemoteList();renderWebdavUploadList();
+    const parts=[];
+    if(added.length)parts.push(`新增 ${added.length} 个题库：${added.join('、')}`);
+    if(copies.length)parts.push(`另存 ${copies.length} 个远端副本：${copies.join('、')}`);
+    if(skipped.length)parts.push(`跳过 ${skipped.length} 个：${skipped.join('、')}`);
+    if(progressText)parts.push(progressText);
+    reportWebdav('下载完成：'+(parts.join('；')||'没有需要写入的内容')+'。',true);
+  }catch(error){
+    restoreStateSnapshot(snapshot);
+    renderAll();
+    reportWebdav('下载失败：'+error.message+'（本地数据已恢复到下载前状态）',false);
+  }finally{setWebdavBusy(false)}
+}
+function renderWebdavUploadList(){
+  const box=$('#webdav-upload-list');if(!box)return;
+  const banks=state.banks||[];
+  if(!banks.length){box.innerHTML='<p class="muted">本地还没有题库。</p>';return}
+  box.innerHTML=banks.map(bank=>{
+    const checked=webdavUploadSel.has(bank.id)?' checked':'';
+    return `<label class="check-line-v23"><input type="checkbox" data-webdav-upload-id="${esc(bank.id)}"${checked} /><span>${esc(bank.name||'未命名题库')} · ${((bank.questions)||[]).length} 题</span></label>`;
+  }).join('');
+}
+function renderWebdavRemoteList(){
+  const box=$('#webdav-remote-list');if(!box)return;
+  if(!webdavRemote.length){box.innerHTML='<p class="muted">尚未读取远端清单，或远端没有任何题库。</p>';return}
+  box.innerHTML=webdavRemote.map(item=>{
+    const exists=state.banks.some(bank=>bank.id===item.id);
+    const checked=webdavDownloadSel.has(item.id)?' checked':'';
+    const stamp=item.updatedAt?String(item.updatedAt).slice(0,19).replace('T',' '):'时间未知';
+    return `<label class="check-line-v23"><input type="checkbox" data-webdav-remote-id="${esc(item.id)}"${checked} /><span>${esc(item.name)} · ${item.questionCount} 题 · ${esc(stamp)} · ${exists?'本地已存在':'本地没有'}</span></label>`;
+  }).join('');
+}
+function injectWebdavStyle(){
+  if($('#webdav-style'))return;
+  const style=document.createElement('style');
+  style.id='webdav-style';
+  style.textContent=`
+    .webdav-bank-list{display:flex;flex-direction:column;gap:6px;max-height:220px;overflow:auto;margin:8px 0;padding:10px;border:1px solid rgba(120,144,180,.22);border-radius:12px;background:rgba(255,255,255,.82)}
+    .webdav-bank-list .check-line-v23{align-items:flex-start}
+    .webdav-bank-list span{font-size:13px;line-height:1.5;word-break:break-all}
+    #settings-webdav-panel h3{margin:16px 0 6px}
+  `;
+  document.head.appendChild(style);
+}
+function setupWebdavSync(){
+  if($('#settings-webdav-panel'))return;
+  const settingsCard=$('#settings .card');if(!settingsCard)return;
+  injectWebdavStyle();
+  settingsCard.insertAdjacentHTML('beforeend',`<div id="settings-webdav-panel" class="data-tools-v23">
+    <h2>云端同步（WebDAV）</h2>
+    <div class="form-grid">
+      <label>服务器地址<input id="webdav-server" spellcheck="false" placeholder="https://dav.example.com/dav/backups/" /></label>
+      <label>远程目录<input id="webdav-dir" spellcheck="false" placeholder="shiroha-quiz" /></label>
+      <label>用户名<input id="webdav-user" autocomplete="username" spellcheck="false" /></label>
+      <label>密码<input id="webdav-pass" type="password" autocomplete="current-password" /></label>
+    </div>
+    <div class="actions wrap-v23">
+      <label class="check-line-v23"><input id="webdav-remember" type="checkbox" /><span>记住密码（只存本机）</span></label>
+      <button class="ghost" id="webdav-save" type="button">保存配置</button>
+      <button class="ghost" id="webdav-test" type="button">测试连接</button>
+    </div>
+    <div id="webdav-status" class="notice">尚未连接。</div>
+    <h3>上传</h3>
+    <p class="muted">覆盖远端同名题库前，会先备份旧版本。</p>
+    <div id="webdav-upload-list" class="webdav-bank-list"></div>
+    <div class="actions wrap-v23">
+      <button class="ghost" id="webdav-select-all-upload" type="button">全选</button>
+      <button class="ghost" id="webdav-select-none-upload" type="button">全不选</button>
+      <label class="check-line-v23"><input id="webdav-progress-upload" type="checkbox" checked /><span>同时上传学习进度</span></label>
+      <button class="primary" id="webdav-upload" type="button">上传</button>
+    </div>
+    <h3>下载</h3>
+    <p class="muted">相同内容跳过，不同的另存为「远端副本」。</p>
+    <div class="actions wrap-v23">
+      <button class="ghost" id="webdav-load-remote" type="button">读取远端清单</button>
+      <button class="ghost" id="webdav-select-all-remote" type="button">全选</button>
+      <button class="ghost" id="webdav-select-none-remote" type="button">全不选</button>
+    </div>
+    <div id="webdav-remote-list" class="webdav-bank-list"></div>
+    <div class="actions wrap-v23">
+      <label class="check-line-v23"><input id="webdav-progress-download" type="checkbox" checked /><span>同时合并远端学习进度</span></label>
+      <button class="primary" id="webdav-download" type="button">下载</button>
+    </div>
+  </div>`);
+  const cfg=webdavConfig();
+  $('#webdav-server').value=cfg.server;
+  $('#webdav-dir').value=cfg.dir||WEBDAV_DEFAULT_DIR_;
+  $('#webdav-user').value=cfg.user;
+  $('#webdav-pass').value=cfg.pass;
+  $('#webdav-remember').checked=cfg.remember;
+  webdavUploadSel=new Set((state.banks||[]).map(bank=>bank.id));
+  renderWebdavUploadList();
+  renderWebdavRemoteList();
+  $('#webdav-save').onclick=()=>{
+    const saved=saveWebdavConfig();
+    if(!webdavRootUrl(saved)){setWebdavStatus('服务器地址无效。','warn');return}
+    setWebdavStatus('配置已保存。','ok');
+  };
+  $('#webdav-test').onclick=async()=>{
+    saveWebdavConfig();setWebdavBusy(true);
+    try{setWebdavStatus(await webdavTest(),'ok')}
+    catch(error){setWebdavStatus('测试连接失败：'+error.message,'warn')}
+    finally{setWebdavBusy(false)}
+  };
+  $('#webdav-select-all-upload').onclick=()=>{webdavUploadSel=new Set((state.banks||[]).map(bank=>bank.id));renderWebdavUploadList()};
+  $('#webdav-select-none-upload').onclick=()=>{webdavUploadSel=new Set();renderWebdavUploadList()};
+  $('#webdav-select-all-remote').onclick=()=>{webdavDownloadSel=new Set(webdavRemote.map(item=>item.id));renderWebdavRemoteList()};
+  $('#webdav-select-none-remote').onclick=()=>{webdavDownloadSel=new Set();renderWebdavRemoteList()};
+  $('#webdav-upload-list').onchange=event=>{
+    const id=event.target&&event.target.dataset?event.target.dataset.webdavUploadId:null;
+    if(id==null)return;
+    if(event.target.checked)webdavUploadSel.add(id);else webdavUploadSel.delete(id);
+  };
+  $('#webdav-remote-list').onchange=event=>{
+    const id=event.target&&event.target.dataset?event.target.dataset.webdavRemoteId:null;
+    if(id==null)return;
+    if(event.target.checked)webdavDownloadSel.add(id);else webdavDownloadSel.delete(id);
+  };
+  $('#webdav-upload').onclick=webdavUpload;
+  $('#webdav-load-remote').onclick=webdavLoadRemoteList;
+  $('#webdav-download').onclick=webdavDownload;
+}
+/* SHIROHA_WEB_WEBDAV_SYNC_END */
 
 // Initialize only after every top-level lexical binding has been created.
 init();
